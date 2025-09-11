@@ -1,5 +1,8 @@
-import logging, pg8000, requests, pytz
+import logging, pg8000, requests, pytz, time
 from datetime import timedelta, datetime as dt
+from io import StringIO
+from functools import wraps
+from contextlib import contextmanager
 
 session = requests.Session()
 session.mount("https://", requests.adapters.HTTPAdapter(max_retries=3))
@@ -7,9 +10,35 @@ session.mount("https://", requests.adapters.HTTPAdapter(max_retries=3))
 # Rolling 30 minute window from current time
 now = dt.now(pytz.utc)
 time_to   = int(now.timestamp())
-time_from = int((now - timedelta(minutes=30)).timestamp())
+time_from = int((now - timedelta(hours=24)).timestamp())
 METRIC = 'electricity'
 
+#Decoration for timing functions
+def log_timing(name=None):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            label = name or func.__name__
+            start = time.perf_counter()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                elapsed = (time.perf_counter() - start) * 1000
+                logging.info(f"⏱ {label} took {elapsed:.2f} ms")
+        return wrapper
+    return decorator
+
+#Function for timing code blocks
+@contextmanager
+def timing_block(label: str):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = (time.perf_counter() - start) * 1000
+        logging.info(f"   ↳ {label} took {elapsed:.2f} ms")
+
+@log_timing()
 def _query_db(db_conf: dict, query, params=None, fetch=True, many=False):
     try:
         with pg8000.connect(
@@ -18,6 +47,7 @@ def _query_db(db_conf: dict, query, params=None, fetch=True, many=False):
             user=db_conf["user"],
             password=db_conf["password"],
             port=int(db_conf["port"]),
+            application_name="smappee_ingest"
         ) as connection:
             with connection.cursor() as cursor:
                 if many:
@@ -32,6 +62,7 @@ def _query_db(db_conf: dict, query, params=None, fetch=True, many=False):
         return [] if fetch else False
     
 # Get service_location, client, location info
+@log_timing()
 def _get_service_locations(db_conf):
     logging.info("Getting service locations")
     query = """
@@ -51,7 +82,7 @@ def _get_service_locations(db_conf):
 
 # Queries metering configuration for each service location to get the sensor index. This is used to match the sensor name to the consumption values
 # Gets the index and the sensor name for each service location
-
+@log_timing()
 def _get_index_for_sensors(service_locations, HEADERS):
     logging.info("Getting index for sensors")
     sensor_index = {}
@@ -85,6 +116,7 @@ def _get_index_for_sensors(service_locations, HEADERS):
 # Gets unique sensor names from the sensor index mapping. Possible to have single or multi-phase sensors in the index
 # Sensor names from Index mappings contains 1 - 3 duplicates, one for each phase
 # Returns unique sensor names for all active service locations
+@log_timing()
 def _get_unique_sensor_names(sensor_index):
     logging.info("Getting unique sensor names")
     sensor_names = set()
@@ -96,26 +128,29 @@ def _get_unique_sensor_names(sensor_index):
 
 # Gets consumption data per service location id
 # Rolling 30 minute window from current time
+@log_timing()
 def _get_consumption_data(service_locations, HEADERS):
     logging.info("Getting consumption data")
     consumption_data_map = {}
-    for slid in service_locations:
-        url = f"https://app1pub.smappee.net/dev/v3/servicelocation/{slid}/consumption?aggregation=1&from={time_from}&to={time_to}"
-        logging.info(f"Fetching data from {url}")
-        response = session.get(url, headers=HEADERS, timeout=10)
-        if response.status_code != 200:
-            logging.warning(f"⚠️ Failed to fetch data for {slid}: {response.status_code}")
-            continue
-        # Gets consumption data for the service location slid
-        data = response.json().get("consumptions", [])
-        # Get only entries with active power values
-        filtered = [entry for entry in data if any(p is not None for p in entry.get("active", []))]
-        if filtered:
-            consumption_data_map[slid] = filtered
+    with timing_block("Get consumption data"):
+        for slid in service_locations:
+            url = f"https://app1pub.smappee.net/dev/v3/servicelocation/{slid}/consumption?aggregation=1&from={time_from}&to={time_to}"
+            logging.info(f"Fetching data from {url}")
+            response = session.get(url, headers=HEADERS, timeout=10)
+            if response.status_code != 200:
+                logging.warning(f"⚠️ Failed to fetch data for {slid}: {response.status_code}")
+                continue
+            # Gets consumption data for the service location slid
+            data = response.json().get("consumptions", [])
+            # Get only entries with active power values
+            filtered = [entry for entry in data if any(p is not None for p in entry.get("active", []))]
+            if filtered:
+                consumption_data_map[slid] = filtered
     logging.info(f"✅ Processed {len(consumption_data_map)} service locations with consumption data")
     return consumption_data_map 
 
 # Gets gateway and sensor information for each service location. Uses the unique sensor names from sensor set with the sensor index.
+@log_timing()
 def _get_gateway_sensor_info(db_conf, service_locations, sensor_index, sensor_set):
         logging.info("Fetching gateway and sensor information for service locations...")
         sensor_gateway_map = {}
@@ -177,6 +212,7 @@ def sum_active_power_per_sensor(active_power, index_mapping):
     return summed_active_power
 
 # Assemble rows for CSV, modify to write to tsdb
+@log_timing()
 def _generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info):
         logging.info("Generating insert statment")
         rows = []
@@ -224,12 +260,13 @@ def _generate_insert(consumption_data_map, sensor_index, service_locations, gate
         #    f.write(final_sql)
         #logging.info(f"SQL insert statement written to {file}")
 
+@log_timing()
 def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map):
-    logging.info("Writing to database")
+    logging.info("Writing to database via COPY -> INSERT ON CONFLICT")
     rows = []
 
     for slid, entries in consumption_data_map.items():
-        if slid not in sensor_index: 
+        if slid not in sensor_index:
             logging.warning(f"⚠️ Sensor index missing for {slid}, skipping...")
             continue
 
@@ -240,36 +277,82 @@ def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info
             for sensor_name, power_value in summed.items():
                 client_id = service_locations.get(slid, {}).get("client_id", "")
                 location_id = service_locations.get(slid, {}).get("location_id", "")
-                gateway, sensor_id = "", ""
+                gateway = sensor_id = ""
 
                 for s in gateway_sensor_info.get(slid, []):
                     if s["sensor_name"] == sensor_name:
                         gateway, sensor_id = s["gateway"], s["sensor"]
                         break
 
-                if all ([client_id, location_id, gateway, sensor_id]):
+                if all([client_id, location_id, gateway, sensor_id]):
                     rows.append([
-                        timestamp, 
-                        sensor_id,
-                        round(power_value, 4), 
-                        gateway,
-                        client_id, 
-                        location_id,
-                        sensor_name, 
-                        METRIC,
-                    ]) 
+                        timestamp,          # time (timestamptz)
+                        sensor_id,          # sensor (text)
+                        round(power_value, 4), # value (numeric/float)
+                        gateway,            # gateway (text)
+                        client_id,          # client_id (text/int)
+                        location_id,        # location_id (text/int)
+                        sensor_name,        # note (text)
+                        METRIC,             # metric (text)
+                    ])
                 else:
-                    logging.warning(f"⚠️ Missing data for {slid}: {client_id}, {location_id}, {power_value}, {gateway}, {sensor_id}")
+                    logging.warning(f"Missing data for {slid}: {client_id}, {location_id}, {power_value}, {gateway}, {sensor_id}")
+
     if not rows:
-        logging.warning("⚠️ No rows to write to database, exiting...")
+        logging.warning("No rows to write to database, exiting...")
         return
-    
-    query = """
-        INSERT INTO main (time, sensor, value, gateway, client_id, location_id, note, metric)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (time, client_id, location_id, metric, gateway, sensor) DO NOTHING;
-            """
-    
-    inserts = _query_db(db_conf, query, rows, fetch=False, many=True)
-    if inserts is not False:
-        logging.info(f"✅ Successfully inserted new rows into the database.")
+
+    logging.info(f"Prepared {len(rows)} rows")
+
+    # Build a CSV/TSV stream for COPY. Using TEXT tab-delimited
+    with timing_block("Streaming"):
+        buf = StringIO()
+        for r in rows:
+            ts = r[0].isoformat()  
+            # Use \N for NULLs 
+            line = f"{ts}\t{r[1]}\t{r[2]}\t{r[3]}\t{r[4]}\t{r[5]}\t{r[6]}\t{r[7]}\n"
+            buf.write(line)
+        buf.seek(0)
+
+    try:
+        with timing_block("Copying to temp"):
+            with pg8000.connect(
+                host=db_conf["host"],
+                database=db_conf["name"],
+                user=db_conf["user"],
+                password=db_conf["password"],
+                port=int(db_conf["port"]),
+                application_name="smappee_ingest"
+            ) as conn:
+                cur = conn.cursor()
+                # Faster commits for ingest; acceptable tiny durability risk.
+                cur.execute("SET LOCAL synchronous_commit = off;")
+
+                # 1) Make a temp table that matches your target table.
+                cur.execute("""
+                    CREATE TEMP TABLE _ingest_main
+                    (LIKE test_table_main INCLUDING DEFAULTS INCLUDING CONSTRAINTS)
+                    ON COMMIT DROP;
+                """)
+
+                # 2) COPY from our in-memory stream into the temp table.
+                #    Using TEXT format with tabs; tell Postgres we're sending from stdin.
+                cur.execute(
+                    "COPY _ingest_main (time, sensor, value, gateway, client_id, location_id, note, metric) "
+                    "FROM stdin WITH (FORMAT text)",
+                    stream=buf
+                )  # pg8000 streams the data to COPY. :contentReference[oaicite:1]{index=1}
+
+                # 3) Dedup into the real table with ON CONFLICT DO NOTHING.
+                with timing_block("Execute insert from temp to main"):
+                    cur.execute("""
+                        INSERT INTO test_table_main (time, sensor, value, gateway, client_id, location_id, note, metric)
+                        SELECT time, sensor, value, gateway, client_id, location_id, note, metric
+                        FROM _ingest_main
+                        ON CONFLICT (time, client_id, location_id, metric, gateway, sensor) DO NOTHING;
+                    """)
+
+                    conn.commit()
+                    logging.info("COPY to temp INSERT to main completed")
+    except Exception as e:
+        logging.exception("Database COPY/INSERT failed: %s", e)

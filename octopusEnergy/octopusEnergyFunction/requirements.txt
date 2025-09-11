@@ -3,7 +3,6 @@
 # Manually managing azure-functions-worker may cause unexpected issues
 
 azure-functions
-requests
 pg8000
 azure-identity
 azure-keyvault-secrets

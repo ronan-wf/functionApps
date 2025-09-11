@@ -3,7 +3,6 @@
 # azure-monitor-opentelemetry
 
 azure-functions
-requests
 pytz
 pg8000
 azure-keyvault-secrets

@@ -86,7 +86,7 @@ def write_to_timescale(db_conf, rows):
         logging.info("No rows to insert.")
         return
     insert_sql = """
-        INSERT INTO test_table_main
+        INSERT INTO main
           (time, client_id, location_id, metric, value, gateway, sensor, note)
         VALUES
           (%s, %s, %s, %s, %s, %s, %s, %s)

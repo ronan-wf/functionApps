@@ -8,7 +8,7 @@ session.mount("https://", requests.adapters.HTTPAdapter(max_retries=3))
 now = dt.now(pytz.utc)
 time_to   = int(now.timestamp())
 time_from = int((now - timedelta(minutes=30)).timestamp())
-METRIC = 'electricy'
+METRIC = 'electricity'
 
 def _query_db(db_conf: dict, query, params=None, fetch=True, many=False):
     try:
@@ -201,7 +201,7 @@ def _generate_insert(consumption_data_map, sensor_index, service_locations, gate
                         logging.warning(f"⚠️ Missing data for {slid}: {client_id}, {location_id}, {power_value}, {gateway}, {sensor_id}")
 
         sql_query = (
-            "INSERT INTO test_table_main (time, sensor, value, gateway, client_id, location_id, note, metric) "
+            "INSERT INTO main (time, sensor, value, gateway, client_id, location_id, note, metric) "
             "VALUES "
         )
 
@@ -265,7 +265,7 @@ def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info
         return
     
     query = """
-        INSERT INTO test_table_main (time, sensor, value, gateway, client_id, location_id, note, metric)
+        INSERT INTO main (time, sensor, value, gateway, client_id, location_id, note, metric)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (time, client_id, location_id, metric, gateway, sensor) DO NOTHING;
             """

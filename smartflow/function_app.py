@@ -1,4 +1,4 @@
-# 08/09/25 10:45
+# 11/09/25 11:25 Writing to main
 import logging
 import tempfile
 from pathlib import Path
@@ -9,19 +9,10 @@ from azure.identity import DefaultAzureCredential
 
 from helpers.helpers import _create_rows, _get_data_smartflow, _get_devices, _write_to_tsdb, clear_token_store, get_active_token
 
-
 app = func.FunctionApp()
 
-@app.timer_trigger(schedule="0 0 */2 * * *", arg_name="myTimer", run_on_startup=False,
-              use_monitor=False) 
-def smartTest(myTimer: func.TimerRequest) -> None:
-    logging.info('Python timer trigger function executed.')
-    if myTimer.past_due:
-        logging.info('The timer is past due!')
-
-
 @app.timer_trigger(
-    schedule="0 0 * * * *", 
+    schedule="0 0/30 * * * *", 
     arg_name="sfTimer",
     run_on_startup=False,
     use_monitor=False

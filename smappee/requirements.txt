@@ -8,4 +8,3 @@ pytz
 pg8000
 azure-keyvault-secrets
 azure-identity
-dotenv

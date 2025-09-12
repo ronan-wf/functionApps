@@ -1,7 +1,7 @@
 # 11/09/25 12:10 Writing to main
 
 import logging
-from helpers.helpers import _get_service_locations,_get_index_for_sensors,_get_unique_sensor_names,_get_consumption_data,_get_gateway_sensor_info,_generate_insert,_write_to_tsdb
+from helpers.helpers import _get_service_locations,_get_index_for_sensors,_get_unique_sensor_names,_get_consumption_data,_get_gateway_sensor_info,_generate_insert,_write_to_tsdb, log_timing
 from helpers.token_refresh import _get_active_token
 
 import azure.functions as func
@@ -71,6 +71,7 @@ def smappeeIngest(myTimer: func.TimerRequest) -> None:
 
     logging.info('Completed Smappee ingest')
 
+@log_timing()
 def test():
     try:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -105,19 +106,15 @@ def test():
 
         #Get service locations, client ID and location ID from tsdb 
         service_locations = _get_service_locations(db_conf) 
-        print(service_locations)
 
         #Get index for sensors per sensor location
         sensor_index = _get_index_for_sensors(service_locations, HEADERS)
-        print(sensor_index)
 
         #Get unique sensor names from the index
         sensor_set = _get_unique_sensor_names(sensor_index)
-        print("Sensor set:", sensor_set)
 
         #Get consumption data for and maps to each service location
         consumption_data_map = _get_consumption_data(service_locations, HEADERS)
-        print(consumption_data_map)
 
         ## Get gateway and sensor information for each service location from tsdb
         gateway_sensor_info = _get_gateway_sensor_info(db_conf, service_locations, sensor_index, sensor_set)

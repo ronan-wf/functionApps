@@ -1,5 +1,7 @@
-import logging, pg8000, requests, pytz
+import logging, pg8000, requests, pytz, time
 from datetime import timedelta, datetime as dt
+from functools import wraps
+from contextlib import contextmanager
 
 session = requests.Session()
 session.mount("https://", requests.adapters.HTTPAdapter(max_retries=3))
@@ -7,8 +9,33 @@ session.mount("https://", requests.adapters.HTTPAdapter(max_retries=3))
 # Rolling 30 minute window from current time
 now = dt.now(pytz.utc)
 time_to   = int(now.timestamp())
-time_from = int((now - timedelta(minutes=30)).timestamp())
+time_from = int((now - timedelta(days=1)).timestamp())
 METRIC = 'electricity'
+
+def log_timing(name=None):
+    """Decorator to log execution time of a function"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            label = name or func.__name__
+            start = time.perf_counter()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                elapsed = (time.perf_counter() - start) * 1000
+                logging.info(f"⏱ {label} took {elapsed:.2f} ms")
+        return wrapper
+    return decorator
+
+@contextmanager
+def timing_block(label: str):
+    """Context manager for measuring arbitrary code blocks"""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = (time.perf_counter() - start) * 1000
+        logging.info(f"   ↳ {label} took {elapsed:.2f} ms")
 
 def _query_db(db_conf: dict, query, params=None, fetch=True, many=False):
     try:
@@ -32,6 +59,7 @@ def _query_db(db_conf: dict, query, params=None, fetch=True, many=False):
         return [] if fetch else False
     
 # Get service_location, client, location info
+@log_timing()
 def _get_service_locations(db_conf):
     logging.info("Getting service locations")
     query = """
@@ -51,7 +79,7 @@ def _get_service_locations(db_conf):
 
 # Queries metering configuration for each service location to get the sensor index. This is used to match the sensor name to the consumption values
 # Gets the index and the sensor name for each service location
-
+@log_timing()
 def _get_index_for_sensors(service_locations, HEADERS):
     logging.info("Getting index for sensors")
     sensor_index = {}
@@ -85,6 +113,7 @@ def _get_index_for_sensors(service_locations, HEADERS):
 # Gets unique sensor names from the sensor index mapping. Possible to have single or multi-phase sensors in the index
 # Sensor names from Index mappings contains 1 - 3 duplicates, one for each phase
 # Returns unique sensor names for all active service locations
+@log_timing()
 def _get_unique_sensor_names(sensor_index):
     logging.info("Getting unique sensor names")
     sensor_names = set()
@@ -96,6 +125,7 @@ def _get_unique_sensor_names(sensor_index):
 
 # Gets consumption data per service location id
 # Rolling 30 minute window from current time
+@log_timing()
 def _get_consumption_data(service_locations, HEADERS):
     logging.info("Getting consumption data")
     consumption_data_map = {}
@@ -116,6 +146,7 @@ def _get_consumption_data(service_locations, HEADERS):
     return consumption_data_map 
 
 # Gets gateway and sensor information for each service location. Uses the unique sensor names from sensor set with the sensor index.
+@log_timing()
 def _get_gateway_sensor_info(db_conf, service_locations, sensor_index, sensor_set):
         logging.info("Fetching gateway and sensor information for service locations...")
         sensor_gateway_map = {}
@@ -224,6 +255,7 @@ def _generate_insert(consumption_data_map, sensor_index, service_locations, gate
         #    f.write(final_sql)
         #logging.info(f"SQL insert statement written to {file}")
 
+@log_timing()
 def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map):
     logging.info("Writing to database")
     rows = []
@@ -263,13 +295,15 @@ def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info
     if not rows:
         logging.warning("⚠️ No rows to write to database, exiting...")
         return
+    logging.info(f"Number of rows prepped {len(rows)}")
     
     query = """
-        INSERT INTO main (time, sensor, value, gateway, client_id, location_id, note, metric)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (time, client_id, location_id, metric, gateway, sensor) DO NOTHING;
+        INSERT INTO test_table_main (time, sensor, value, gateway, client_id, location_id, note, metric)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
             """
+        #ON CONFLICT (time, client_id, location_id, metric, gateway, sensor) DO NOTHING;
     
-    inserts = _query_db(db_conf, query, rows, fetch=False, many=True)
-    if inserts is not False:
-        logging.info(f"✅ Successfully inserted new rows into the database.")
+    with timing_block("Insert statement"):
+        inserts = _query_db(db_conf, query, rows, fetch=False, many=True)
+        if inserts is not False:
+            logging.info(f"✅ Successfully inserted new rows into the database.")

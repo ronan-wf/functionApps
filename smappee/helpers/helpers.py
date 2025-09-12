@@ -304,12 +304,12 @@ def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info
 
     logging.info(f"Prepared {len(rows)} rows")
 
-    # Build a CSV/TSV stream for COPY. Using TEXT tab-delimited
+    # Build a CSV/TSV stream for COPY, Using TEXT tab-delimited
     with timing_block("Streaming"):
         buf = StringIO()
         for r in rows:
-            ts = r[0].isoformat()  
-            # Use \N for NULLs 
+            ts = r[0].isoformat()  #timestamp to iso
+            # Use \N for NULLs if needed, should never be NULLs
             line = f"{ts}\t{r[1]}\t{r[2]}\t{r[3]}\t{r[4]}\t{r[5]}\t{r[6]}\t{r[7]}\n"
             buf.write(line)
         buf.seek(0)
@@ -328,22 +328,23 @@ def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info
                 # Faster commits for ingest; acceptable tiny durability risk.
                 cur.execute("SET LOCAL synchronous_commit = off;")
 
-                # 1) Make a temp table that matches your target table.
+                # Make a temp table that matches target table
                 cur.execute("""
                     CREATE TEMP TABLE _ingest_main
                     (LIKE test_table_main INCLUDING DEFAULTS INCLUDING CONSTRAINTS)
                     ON COMMIT DROP;
                 """)
 
-                # 2) COPY from our in-memory stream into the temp table.
-                #    Using TEXT format with tabs; tell Postgres we're sending from stdin.
+                # COPY from in-memory stream into the temp table.
+                # Using TEXT format with tabs; tell Postgres we're sending from stdin
                 cur.execute(
                     "COPY _ingest_main (time, sensor, value, gateway, client_id, location_id, note, metric) "
                     "FROM stdin WITH (FORMAT text)",
                     stream=buf
                 )  # pg8000 streams the data to COPY. :contentReference[oaicite:1]{index=1}
 
-                # 3) Dedup into the real table with ON CONFLICT DO NOTHING.
+                # Dedup into main table with ON CONFLICT DO NOTHING.
+                # Reduces time to insert data to table
                 with timing_block("Execute insert from temp to main"):
                     cur.execute("""
                         INSERT INTO test_table_main (time, sensor, value, gateway, client_id, location_id, note, metric)
@@ -353,6 +354,6 @@ def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info
                     """)
 
                     conn.commit()
-                    logging.info("COPY to temp INSERT to main completed")
+                    logging.info("COPY to temp > INSERT to main completed")
     except Exception as e:
         logging.exception("Database COPY/INSERT failed: %s", e)

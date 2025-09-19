@@ -65,7 +65,7 @@ def smappeeIngest(myTimer: func.TimerRequest) -> None:
         #_generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info)
 
         # Write to tsdb test_main table
-        _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
+        #_write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
 
     except Exception as e:
         logging.exception("Startup failure in SmartFlow timer handler: %s", e)
@@ -121,10 +121,10 @@ def test():
         gateway_sensor_info = _get_gateway_sensor_info(db_conf, service_locations, sensor_index, sensor_set)
 
         # Assemble CSV to create insert statements for tsdb
-        #_generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info)
+        _generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info)
 
         # Write to tsdb test_main table
-        _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
+        #_write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
 
     except Exception as e:
         logging.exception("Startup failure in SmartFlow timer handler: %s", e)

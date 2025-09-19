@@ -1,8 +1,9 @@
-import logging, pg8000, requests, pytz, time
+import logging, pg8000, requests, pytz, time, string
 from datetime import timedelta, datetime as dt
 from io import StringIO
 from functools import wraps
 from contextlib import contextmanager
+from collections import OrderedDict
 
 session = requests.Session()
 session.mount("https://", requests.adapters.HTTPAdapter(max_retries=3))
@@ -64,13 +65,14 @@ def _query_db(db_conf: dict, query, params=None, fetch=True, many=False):
 # Get service_location, client, location info
 @log_timing()
 def _get_service_locations(db_conf):
-    logging.info("Getting service locations")
+    logging.info("1. Getting service locations")
     query = """
         select sl.service_loc_id, sl.client_id, l.location_id
         from service_locations sl
         left join locations l on l.location_id = sl.location_id
     """
     records = _query_db(db_conf, query, params=None, fetch=True, many=False)
+    logging.info(records)
     logging.info(f"Fetched {len(records)} service locations from the database")
     if not records:
         logging.warning("No service locations found in the database")
@@ -84,8 +86,9 @@ def _get_service_locations(db_conf):
 # Gets the index and the sensor name for each service location
 @log_timing()
 def _get_index_for_sensors(service_locations, HEADERS):
-    logging.info("Getting index for sensors")
+    logging.info("2. Getting index for sensors")
     sensor_index = {}
+
     for slid in service_locations:
         url = f"https://app1pub.smappee.net/dev/v3/servicelocation/{slid}/meteringconfiguration"
         resp = session.get(url, headers=HEADERS, timeout=10)
@@ -97,19 +100,26 @@ def _get_index_for_sensors(service_locations, HEADERS):
         data = resp.json()
         measurements = data.get("measurements", [])
 
-        # Checks if serviceLocationId is in response for measurements section. If yes, this is a parent location and should be skipped.
+        # Skip parent locations
         if measurements and "serviceLocationId" in measurements[0]:
             logging.error(f"Parent location, serviceLocationId in measurements for {slid}")
-            continue    
+            continue
 
-        index_map = {
-            ch["consumptionIndex"]: ch["name"] 
+        # Collect (consumptionIndex, name) pairs
+        pairs = [
+            (ch["consumptionIndex"], ch["name"])
             for m in measurements
-            for ch in m.get("channels", []) 
+            for ch in m.get("channels", [])
             if "consumptionIndex" in ch and "name" in ch
-            }
-        
+        ]
+
+        # Sort by index to lock the order 0,1,2,... regardless of API list order
+        pairs.sort(key=lambda x: x[0])
+        index_map = OrderedDict(pairs)
+
         sensor_index[slid] = index_map
+
+    logging.info(sensor_index)  # this will now show OrderedDicts in index order
     logging.info(f"Processed {len(sensor_index)} service locations for sensor index")
     return sensor_index
 
@@ -118,19 +128,26 @@ def _get_index_for_sensors(service_locations, HEADERS):
 # Returns unique sensor names for all active service locations
 @log_timing()
 def _get_unique_sensor_names(sensor_index):
-    logging.info("Getting unique sensor names")
-    sensor_names = set()
+    logging.info("3. Getting unique sensor names (order-preserving)")
+    ordered_unique = OrderedDict()
 
-    for sensor_list in sensor_index.values():
-        sensor_names.update(sensor_list.values())
-    logging.info(f"Processed {len(sensor_names)} unique sensor names.")
-    return sorted(sensor_names)
+    # deterministic traversal across locations (adjust if you prefer insertion order)
+    for slid in sorted(sensor_index.keys()):
+        idx_map = sensor_index[slid]  # this is an OrderedDict sorted by consumptionIndex
+        for name in idx_map.values():
+            if name not in ordered_unique:
+                ordered_unique[name] = None
+
+    names = list(ordered_unique.keys())
+    logging.info(f"Processed {len(names)} unique sensor names.")
+    logging.info(names)  # keep as list; avoid sets/sorted() which wreck order
+    return names
 
 # Gets consumption data per service location id
 # Rolling 30 minute window from current time
 @log_timing()
 def _get_consumption_data(service_locations, HEADERS):
-    logging.info("Getting consumption data")
+    logging.info("4. Getting consumption data")
     consumption_data_map = {}
     with timing_block("Get consumption data"):
         for slid in service_locations:
@@ -147,50 +164,86 @@ def _get_consumption_data(service_locations, HEADERS):
             if filtered:
                 consumption_data_map[slid] = filtered
     logging.info(f"✅ Processed {len(consumption_data_map)} service locations with consumption data")
-    return consumption_data_map 
+    return consumption_data_map     
 
 # Gets gateway and sensor information for each service location. Uses the unique sensor names from sensor set with the sensor index.
 @log_timing()
 def _get_gateway_sensor_info(db_conf, service_locations, sensor_index, sensor_set):
-        logging.info("Fetching gateway and sensor information for service locations...")
-        sensor_gateway_map = {}
+    logging.info("5. Fetching gateway and sensor information for service locations...")
+    sensor_gateway_map = {}
 
-        if isinstance(service_locations, dict):
-            for slid, info in service_locations.items():
-                if slid not in sensor_index:
-                    logging.warning(f"⚠️ Service location {slid} not in sensor index")
-                    continue
-                
-                # Checks if the service location id is in the service_location_info dictionary
-                # If not, it means the service location is not in tsdb. eg Parent loc, inactive, etc.
-                client_id, location_id = info["client_id"], info["location_id"]
-                if not client_id or not location_id:
-                    logging.warning(f"⚠️ Service location {slid} has no client or location id in database.")
-                    continue
-                # for each sensor name with client/location id combination
-                placeholders = ', '.join(['%s'] * len(sensor_set))
+    # Tracks next created gateway index per service locations client_id/location_id
+    new_gateway_counter = {}
 
-                query = f'''
-                    SELECT DISTINCT gateway, sensor, note
-                    FROM main
-                    WHERE client_id = %s
-                      AND location_id = %s
-                      AND note IN ({placeholders})
-                      AND time >= current_timestamp - INTERVAL '1 day';
-                '''
+    def new_gateway_id(n: int) -> str:
+        n = int(n)
+        letters = []
+        while True:
+            n, rem = divmod(n, 26)
+            letters.append(string.ascii_uppercase[rem])
+            if n == 0:
+                break
+            n -= 1
+        return ''.join(reversed(letters))
 
-                parameters = [client_id, location_id] + list(sensor_set)
-                records = _query_db(db_conf, query, parameters)
+    if not isinstance(service_locations, dict):
+        logging.error("⚠️ Service locations should be a dictionary")
+        return {}
 
-                sensor_gateway_map[slid] = [
-                     {"sensor": rec[1], "gateway": rec[0], "sensor_name": rec[2]}
-                     for rec in records if rec
-                ]
-        else: 
-            logging.error("⚠️ Service locations should be a dictionary")
-            return {}
-        logging.info(f"Processed {len(sensor_gateway_map)} service locations for gateway and sensor information")
-        return sensor_gateway_map
+    if not sensor_set:
+        logging.warning("⚠️ sensor_set is empty; nothing to map")
+        return {}
+
+    #TODO: Check if sensor_index or sensor_set should be used, add slid to sensor_set
+    for slid, info in service_locations.items():
+        if slid not in sensor_index:
+            logging.warning(f"⚠️ Service location {slid} not in sensor index")
+            continue
+
+        client_id = info.get("client_id")
+        location_id = info.get("location_id")
+        if not client_id or not location_id:
+            logging.warning(f"⚠️ Service location {slid} has no client or location id in database.")
+            continue
+
+        # Query existing gateway/sensor rows for these notes in the last day
+        placeholders = ', '.join(['%s'] * len(sensor_set))
+        query = f'''
+            SELECT DISTINCT gateway, sensor, note
+            FROM main
+            WHERE client_id = %s
+              AND location_id = %s
+              AND note IN ({placeholders})
+              AND time >= current_timestamp - INTERVAL '1 day';
+        '''
+        parameters = [client_id, location_id] + list(sensor_set)
+        records = _query_db(db_conf, query, parameters)
+
+        if records:
+            # Use the data from tsdb
+            sensor_gateway_map[slid] = [
+                {"sensor": rec[1], "gateway": rec[0], "sensor_name": rec[2]}
+                for rec in records if rec
+            ]
+        else:
+            # No records found: create a new gateway for this client/location and map all sensors
+            key = (client_id, location_id)
+            next_idx = new_gateway_counter.get(key, 0)
+            gateway_label = new_gateway_id(next_idx)
+            new_gateway_counter[key] = next_idx + 1
+
+            # Adds sensor_id, gateway, sensor name to sensor_gateway_map for each sensor in sensor_set
+            sensor_gateway_map[slid] = [
+                {"sensor": i + 1, "gateway": gateway_label, "sensor_name": sname}
+                for i, sname in enumerate(sensor_set)
+            ]
+            logging.info(
+                f"Created gateway '{gateway_label}' for client_id {client_id} & location_id {location_id} "
+                f"for service_location_id {slid} with {len(sensor_set)} sensors (IDs 1..{len(sensor_set)})."
+            )
+
+    logging.info(f"Processed {len(sensor_gateway_map)} service locations for gateway and sensor information")
+    return sensor_gateway_map
 
 # Sum the active power values for each sensor name
 def sum_active_power_per_sensor(active_power, index_mapping):
@@ -237,7 +290,7 @@ def _generate_insert(consumption_data_map, sensor_index, service_locations, gate
                         logging.warning(f"⚠️ Missing data for {slid}: {client_id}, {location_id}, {power_value}, {gateway}, {sensor_id}")
 
         sql_query = (
-            "INSERT INTO main (time, sensor, value, gateway, client_id, location_id, note, metric) "
+            "INSERT INTO test_table_main (time, sensor, value, gateway, client_id, location_id, note, metric) "
             "VALUES "
         )
 
@@ -255,10 +308,10 @@ def _generate_insert(consumption_data_map, sensor_index, service_locations, gate
         )
         logging.info("Generated insert statement")
         # Write to file for local testing and verification
-        #file = f"tsdb_insert{dt.now().strftime('%Y-%m-%d')}.txt"
-        #with open(file, "w") as f:
-        #    f.write(final_sql)
-        #logging.info(f"SQL insert statement written to {file}")
+        file = f"tsdb_insert{dt.now().strftime('%Y-%m-%d')}.txt"
+        with open(file, "w") as f:
+            f.write(final_sql)
+        logging.info(f"SQL insert statement written to {file}")
 
 @log_timing()
 def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map):

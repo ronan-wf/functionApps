@@ -16,7 +16,7 @@ app = func.FunctionApp()
               use_monitor=False) 
 @log_timing()
 def smappeeIngest(myTimer: func.TimerRequest) -> None:
-    logging.info("Starting Smappee ingest")
+    logging.info("Starting UAE Smappee ingest")
     try:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         KV_URI = "https://uaeapicredentials.vault.azure.net/"
@@ -48,6 +48,8 @@ def smappeeIngest(myTimer: func.TimerRequest) -> None:
         "Accept": "application/json"
         }
 
+        TOKEN_STORE_PATH = Path(tempfile.gettempdir()) / "uae_smartflow_tokens.json"
+
         #Get service locations, client ID and location ID from tsdb 
         service_locations = _get_service_locations(db_conf) 
 
@@ -64,15 +66,17 @@ def smappeeIngest(myTimer: func.TimerRequest) -> None:
         gateway_sensor_info = _get_gateway_sensor_info(db_conf, service_locations, sensor_index, sensor_set)
 
         # Assemble CSV to create insert statements for tsdb
-        _generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info)
+        #_generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info)
+        
+        #clear_token_store(TOKEN_STORE_PATH)
 
         # Write to tsdb test_main table
-        #_write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
+        _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
 
     except Exception as e:
         logging.exception("Startup failure in SmartFlow timer handler: %s", e)
 
-    logging.info('Completed Smappee ingest')
+    logging.info('Completed UAE Smappee ingest')
 
 @log_timing()
 def test():
@@ -125,12 +129,12 @@ def test():
         gateway_sensor_info = _get_gateway_sensor_info(db_conf, service_locations, sensor_index, sensor_set)
 
         # Assemble CSV to create insert statements for tsdb
-        _generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info)
+        #_generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info)
         
         #clear_token_store(TOKEN_STORE_PATH)
 
         # Write to tsdb test_main table
-        #_write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
+        _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
 
     except Exception as e:
         logging.exception("Startup failure in SmartFlow timer handler: %s", e)

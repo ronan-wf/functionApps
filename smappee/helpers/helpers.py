@@ -8,10 +8,6 @@ from collections import OrderedDict
 session = requests.Session()
 session.mount("https://", requests.adapters.HTTPAdapter(max_retries=3))
 
-# Rolling 30 minute window from current time
-now = dt.now(pytz.utc)
-time_to   = int(now.timestamp())
-time_from = int((now - timedelta(hours=24)).timestamp())
 METRIC = 'electricity'
 
 #Decoration for timing functions
@@ -148,7 +144,13 @@ def _get_unique_sensor_names(sensor_index):
 @log_timing()
 def _get_consumption_data(service_locations, HEADERS):
     logging.info("4. Getting consumption data")
+
+    # Rolling 30 minute window from current time
+    now = dt.now(pytz.utc)
+    time_to   = int(now.timestamp())
+    time_from = int((now - timedelta(hours=24)).timestamp())
     consumption_data_map = {}
+    
     with timing_block("Get consumption data"):
         for slid in service_locations:
             url = f"https://app1pub.smappee.net/dev/v3/servicelocation/{slid}/consumption?aggregation=1&from={time_from}&to={time_to}"

@@ -8,13 +8,9 @@ from collections import OrderedDict
 session = requests.Session()
 session.mount("https://", requests.adapters.HTTPAdapter(max_retries=3))
 
-# Rolling 30 minute window from current time
-now = dt.now(pytz.utc)
-time_to   = int(now.timestamp())
-time_from = int((now - timedelta(hours=24)).timestamp())
 METRIC = 'electricity'
-temp_table = "_ingest_test_table_main"
-insert_table = "test_table_main"
+temp_table = "_ingest_main"
+insert_table = "main"
 
 #Decoration for timing functions
 def log_timing(name=None):
@@ -150,6 +146,10 @@ def _get_unique_sensor_names(sensor_index):
 @log_timing()
 def _get_consumption_data(service_locations, HEADERS):
     logging.info("4. Getting consumption data")
+    # Rolling 24 hour window from current time
+    now = dt.now(pytz.utc)
+    time_to   = int(now.timestamp())
+    time_from = int((now - timedelta(hours=24)).timestamp())
     consumption_data_map = {}
     with timing_block("Get consumption data"):
         for slid in service_locations:
@@ -312,10 +312,10 @@ def _generate_insert(consumption_data_map, sensor_index, service_locations, gate
         )
         logging.info("Generated insert statement")
         # Write to file for local testing and verification
-        file = f"tsdb_insert{dt.now().strftime('%Y-%m-%d')}.txt"
-        with open(file, "w") as f:
-            f.write(final_sql)
-        logging.info(f"SQL insert statement written to {file}")
+        #file = f"tsdb_insert{dt.now().strftime('%Y-%m-%d')}.txt"
+        #with open(file, "w") as f:
+        #    f.write(final_sql)
+        #logging.info(f"SQL insert statement written to {file}")
 
 @log_timing()
 def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map):
@@ -358,9 +358,8 @@ def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info
     if not rows:
         logging.warning("No rows to write to database, exiting...")
         return
-
     logging.info(f"Prepared {len(rows)} rows")
-
+    
     # Build a CSV/TSV stream for COPY, Using TEXT tab-delimited
     with timing_block("Streaming"):
         buf = StringIO()

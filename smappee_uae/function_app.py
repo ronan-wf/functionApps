@@ -1,12 +1,12 @@
-# 11/09/25 12:10 Writing to main
+# 19/09/25 15:55
 
 import logging
+import azure.functions as func
 from pathlib import Path
 import tempfile
 from helpers.helpers import _get_service_locations,_get_index_for_sensors,_get_unique_sensor_names,_get_consumption_data,_get_gateway_sensor_info,_generate_insert,_write_to_tsdb, log_timing
 from helpers.token_refresh import _get_active_token, clear_token_store
 
-import azure.functions as func
 from azure.keyvault.secrets import SecretClient
 from azure.identity import DefaultAzureCredential
 
@@ -15,7 +15,7 @@ app = func.FunctionApp()
 @app.timer_trigger(schedule="0 */5 * * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
 @log_timing()
-def smappeeIngest(myTimer: func.TimerRequest) -> None:
+def uaeSmappeeIngest(myTimer: func.TimerRequest) -> None:
     logging.info("Starting UAE Smappee ingest")
     try:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

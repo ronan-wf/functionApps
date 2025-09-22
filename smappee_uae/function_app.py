@@ -1,10 +1,12 @@
-# 11/09/25 12:10 Writing to main
+# 19/09/25 15:55
 
 import logging
-from helpers.helpers import _get_service_locations,_get_index_for_sensors,_get_unique_sensor_names,_get_consumption_data,_get_gateway_sensor_info,_generate_insert,_write_to_tsdb, log_timing
-from helpers.token_refresh import _get_active_token
-
 import azure.functions as func
+from pathlib import Path
+import tempfile
+from helpers.helpers import _get_service_locations,_get_index_for_sensors,_get_unique_sensor_names,_get_consumption_data,_get_gateway_sensor_info,_generate_insert,_write_to_tsdb, log_timing
+from helpers.token_refresh import _get_active_token, clear_token_store
+
 from azure.keyvault.secrets import SecretClient
 from azure.identity import DefaultAzureCredential
 
@@ -13,11 +15,11 @@ app = func.FunctionApp()
 @app.timer_trigger(schedule="0 */5 * * * *", arg_name="myTimer", run_on_startup=False,
               use_monitor=False) 
 @log_timing()
-def smappeeIngest(myTimer: func.TimerRequest) -> None:
-    logging.info("Starting Smappee ingest")
+def uaeSmappeeIngest(myTimer: func.TimerRequest) -> None:
+    logging.info("Starting UAE Smappee ingest")
     try:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-        KV_URI = "https://wffunctionappsvault.vault.azure.net/"
+        KV_URI = "https://uaeapicredentials.vault.azure.net/"
         credential = DefaultAzureCredential()
         kv = SecretClient(vault_url=KV_URI, credential=credential)
 
@@ -32,10 +34,10 @@ def smappeeIngest(myTimer: func.TimerRequest) -> None:
 
         sm_conf = {
             "grant_type": "password",
-            "client_id": kv.get_secret("smappeeClientID").value,
-            "client_secret": kv.get_secret("smappeeClientSecret").value,
-            "username": kv.get_secret("smappeeUsername").value,
-            "password": kv.get_secret("smappeePassword").value,
+            "client_id": kv.get_secret("uaeSmappeeClientID").value,
+            "client_secret": kv.get_secret("uaeSmappeeClientSecret").value,
+            "username": kv.get_secret("uaeSmappeeUsername").value,
+            "password": kv.get_secret("uaeSmappeePassword").value,
         }
         
 
@@ -45,6 +47,8 @@ def smappeeIngest(myTimer: func.TimerRequest) -> None:
         "Authorization": f"Bearer {SM_TOKEN}",
         "Accept": "application/json"
         }
+
+        TOKEN_STORE_PATH = Path(tempfile.gettempdir()) / "uae_smartflow_tokens.json"
 
         #Get service locations, client ID and location ID from tsdb 
         service_locations = _get_service_locations(db_conf) 
@@ -63,20 +67,22 @@ def smappeeIngest(myTimer: func.TimerRequest) -> None:
 
         # Assemble CSV to create insert statements for tsdb
         #_generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info)
+        
+        #clear_token_store(TOKEN_STORE_PATH)
 
         # Write to tsdb test_main table
-        #_write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
+        _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
 
     except Exception as e:
         logging.exception("Startup failure in SmartFlow timer handler: %s", e)
 
-    logging.info('Completed Smappee ingest')
+    logging.info('Completed UAE Smappee ingest')
 
 @log_timing()
 def test():
     try:
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-        KV_URI = "https://wffunctionappsvault.vault.azure.net/"
+        KV_URI = "https://uaeapicredentials.vault.azure.net/"
         credential = DefaultAzureCredential()
         kv = SecretClient(vault_url=KV_URI, credential=credential)
 
@@ -91,10 +97,10 @@ def test():
 
         sm_conf = {
             "grant_type": "password",
-            "client_id": kv.get_secret("smappeeClientID").value,
-            "client_secret": kv.get_secret("smappeeClientSecret").value,
-            "username": kv.get_secret("smappeeUsername").value,
-            "password": kv.get_secret("smappeePassword").value,
+            "client_id": kv.get_secret("uaeSmappeeClientID").value,
+            "client_secret": kv.get_secret("uaeSmappeeClientSecret").value,
+            "username": kv.get_secret("uaeSmappeeUsername").value,
+            "password": kv.get_secret("uaeSmappeePassword").value,
         }
         
 
@@ -104,6 +110,8 @@ def test():
         "Authorization": f"Bearer {SM_TOKEN}",
         "Accept": "application/json"
         }
+
+        TOKEN_STORE_PATH = Path(tempfile.gettempdir()) / "uae_smartflow_tokens.json"
 
         #Get service locations, client ID and location ID from tsdb 
         service_locations = _get_service_locations(db_conf) 
@@ -121,10 +129,12 @@ def test():
         gateway_sensor_info = _get_gateway_sensor_info(db_conf, service_locations, sensor_index, sensor_set)
 
         # Assemble CSV to create insert statements for tsdb
-        _generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info)
+        #_generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info)
+        
+        #clear_token_store(TOKEN_STORE_PATH)
 
         # Write to tsdb test_main table
-        #_write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
+        _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map)
 
     except Exception as e:
         logging.exception("Startup failure in SmartFlow timer handler: %s", e)

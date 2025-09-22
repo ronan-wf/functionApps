@@ -9,6 +9,8 @@ session = requests.Session()
 session.mount("https://", requests.adapters.HTTPAdapter(max_retries=3))
 
 METRIC = 'electricity'
+temp_table = "_ingest_main"
+insert_table = "main"
 
 #Decoration for timing functions
 def log_timing(name=None):
@@ -64,11 +66,11 @@ def _get_service_locations(db_conf):
     logging.info("1. Getting service locations")
     query = """
         select sl.service_loc_id, sl.client_id, l.location_id
-        from service_locations sl
+        from uae_service_locations sl
         left join locations l on l.location_id = sl.location_id
     """
     records = _query_db(db_conf, query, params=None, fetch=True, many=False)
-    logging.info(records)
+    logging.info(f"UAE service locations: {records}")
     logging.info(f"Fetched {len(records)} service locations from the database")
     if not records:
         logging.warning("No service locations found in the database")
@@ -115,7 +117,7 @@ def _get_index_for_sensors(service_locations, HEADERS):
 
         sensor_index[slid] = index_map
 
-    logging.info(sensor_index)  # this will now show OrderedDicts in index order
+    logging.info(f"Sensor index for {slid}: {sensor_index}")  # this will now show OrderedDicts in index order
     logging.info(f"Processed {len(sensor_index)} service locations for sensor index")
     return sensor_index
 
@@ -136,7 +138,7 @@ def _get_unique_sensor_names(sensor_index):
 
     names = list(ordered_unique.keys())
     logging.info(f"Processed {len(names)} unique sensor names.")
-    logging.info(names)  # keep as list; avoid sets/sorted() which wreck order
+    logging.info(f"Unique sensor names for {slid}: {names}")  # keep as list; avoid sets/sorted() which wreck order
     return names
 
 # Gets consumption data per service location id
@@ -144,13 +146,11 @@ def _get_unique_sensor_names(sensor_index):
 @log_timing()
 def _get_consumption_data(service_locations, HEADERS):
     logging.info("4. Getting consumption data")
-
-    # Rolling 30 minute window from current time
+    # Rolling 24 hour window from current time
     now = dt.now(pytz.utc)
     time_to   = int(now.timestamp())
     time_from = int((now - timedelta(hours=24)).timestamp())
     consumption_data_map = {}
-    
     with timing_block("Get consumption data"):
         for slid in service_locations:
             url = f"https://app1pub.smappee.net/dev/v3/servicelocation/{slid}/consumption?aggregation=1&from={time_from}&to={time_to}"
@@ -165,7 +165,7 @@ def _get_consumption_data(service_locations, HEADERS):
             filtered = [entry for entry in data if any(p is not None for p in entry.get("active", []))]
             if filtered:
                 consumption_data_map[slid] = filtered
-    logging.info(f"✅ Processed {len(consumption_data_map)} service locations with consumption data")
+    logging.info(f"Processed {len(consumption_data_map)} service locations with consumption data")
     return consumption_data_map     
 
 # Gets gateway and sensor information for each service location. Uses the unique sensor names from sensor set with the sensor index.
@@ -212,7 +212,7 @@ def _get_gateway_sensor_info(db_conf, service_locations, sensor_index, sensor_se
         placeholders = ', '.join(['%s'] * len(sensor_set))
         query = f'''
             SELECT DISTINCT gateway, sensor, note
-            FROM main
+            FROM {insert_table}
             WHERE client_id = %s
               AND location_id = %s
               AND note IN ({placeholders})
@@ -223,12 +223,14 @@ def _get_gateway_sensor_info(db_conf, service_locations, sensor_index, sensor_se
 
         if records:
             # Use the data from tsdb
+            logging.info("Using gateway and sensor info from tsdb")
             sensor_gateway_map[slid] = [
                 {"sensor": rec[1], "gateway": rec[0], "sensor_name": rec[2]}
                 for rec in records if rec
             ]
         else:
             # No records found: create a new gateway for this client/location and map all sensors
+            logging.info(f"No gateway/sensors found for {slid}")
             key = (client_id, location_id)
             next_idx = new_gateway_counter.get(key, 0)
             gateway_label = new_gateway_id(next_idx)
@@ -269,7 +271,7 @@ def sum_active_power_per_sensor(active_power, index_mapping):
 # Assemble rows for CSV, modify to write to tsdb
 @log_timing()
 def _generate_insert(consumption_data_map, sensor_index, service_locations, gateway_sensor_info):
-        logging.info("Generating insert statment")
+        logging.info("6. Generating insert statment")
         rows = []
         for slid, entries in consumption_data_map.items():
             if slid not in sensor_index:
@@ -292,7 +294,7 @@ def _generate_insert(consumption_data_map, sensor_index, service_locations, gate
                         logging.warning(f"⚠️ Missing data for {slid}: {client_id}, {location_id}, {power_value}, {gateway}, {sensor_id}")
 
         sql_query = (
-            "INSERT INTO test_table_main (time, sensor, value, gateway, client_id, location_id, note, metric) "
+            f"INSERT INTO {insert_table} (time, sensor, value, gateway, client_id, location_id, note, metric) "
             "VALUES "
         )
 
@@ -310,14 +312,14 @@ def _generate_insert(consumption_data_map, sensor_index, service_locations, gate
         )
         logging.info("Generated insert statement")
         # Write to file for local testing and verification
-        file = f"tsdb_insert{dt.now().strftime('%Y-%m-%d')}.txt"
-        with open(file, "w") as f:
-            f.write(final_sql)
-        logging.info(f"SQL insert statement written to {file}")
+        #file = f"tsdb_insert{dt.now().strftime('%Y-%m-%d')}.txt"
+        #with open(file, "w") as f:
+        #    f.write(final_sql)
+        #logging.info(f"SQL insert statement written to {file}")
 
 @log_timing()
 def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info, consumption_data_map):
-    logging.info("Writing to database via COPY -> INSERT ON CONFLICT")
+    logging.info("6. Writing to database by COPY -> INSERT ON CONFLICT")
     rows = []
 
     for slid, entries in consumption_data_map.items():
@@ -356,9 +358,8 @@ def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info
     if not rows:
         logging.warning("No rows to write to database, exiting...")
         return
-
     logging.info(f"Prepared {len(rows)} rows")
-
+    
     # Build a CSV/TSV stream for COPY, Using TEXT tab-delimited
     with timing_block("Streaming"):
         buf = StringIO()
@@ -384,27 +385,27 @@ def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info
                 cur.execute("SET LOCAL synchronous_commit = off;")
 
                 # Make a temp table that matches target table
-                cur.execute("""
-                    CREATE TEMP TABLE _ingest_main
-                    (LIKE test_table_main INCLUDING DEFAULTS INCLUDING CONSTRAINTS)
+                cur.execute(f"""
+                    CREATE TEMP TABLE {temp_table}
+                    (LIKE {insert_table} INCLUDING DEFAULTS INCLUDING CONSTRAINTS)
                     ON COMMIT DROP;
                 """)
 
                 # COPY from in-memory stream into the temp table.
                 # Using TEXT format with tabs; tell Postgres we're sending from stdin
                 cur.execute(
-                    "COPY _ingest_main (time, sensor, value, gateway, client_id, location_id, note, metric) "
+                    f"COPY {temp_table} (time, sensor, value, gateway, client_id, location_id, note, metric) "
                     "FROM stdin WITH (FORMAT text)",
                     stream=buf
                 )  # pg8000 streams the data to COPY. :contentReference[oaicite:1]{index=1}
 
                 # Dedup into main table with ON CONFLICT DO NOTHING.
                 # Reduces time to insert data to table
-                with timing_block("Execute insert from temp to main"):
-                    cur.execute("""
-                        INSERT INTO test_table_main (time, sensor, value, gateway, client_id, location_id, note, metric)
+                with timing_block(f"Execute insert from {temp_table} to {insert_table}"):
+                    cur.execute(f"""
+                        INSERT INTO {insert_table} (time, sensor, value, gateway, client_id, location_id, note, metric)
                         SELECT time, sensor, value, gateway, client_id, location_id, note, metric
-                        FROM _ingest_main
+                        FROM {temp_table}
                         ON CONFLICT (time, client_id, location_id, metric, gateway, sensor) DO NOTHING;
                     """)
 

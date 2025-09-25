@@ -1,4 +1,4 @@
-# 19/09/25 15:55
+# 25/09/25 10:30  Updated application name & ingest table
 
 import logging
 import azure.functions as func

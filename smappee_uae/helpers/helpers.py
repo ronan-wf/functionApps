@@ -9,7 +9,7 @@ session = requests.Session()
 session.mount("https://", requests.adapters.HTTPAdapter(max_retries=3))
 
 METRIC = 'electricity'
-temp_table = "_ingest_main"
+temp_table = "_ingest_uae_main"
 insert_table = "main"
 
 #Decoration for timing functions
@@ -46,7 +46,7 @@ def _query_db(db_conf: dict, query, params=None, fetch=True, many=False):
             user=db_conf["user"],
             password=db_conf["password"],
             port=int(db_conf["port"]),
-            application_name="smappee_ingest"
+            application_name="uae_smappee_ingest"
         ) as connection:
             with connection.cursor() as cursor:
                 if many:
@@ -378,7 +378,7 @@ def _write_to_tsdb(db_conf, sensor_index, service_locations, gateway_sensor_info
                 user=db_conf["user"],
                 password=db_conf["password"],
                 port=int(db_conf["port"]),
-                application_name="smappee_ingest"
+                application_name="uae_smappee_ingest"
             ) as conn:
                 cur = conn.cursor()
                 # Faster commits for ingest; acceptable tiny durability risk.
